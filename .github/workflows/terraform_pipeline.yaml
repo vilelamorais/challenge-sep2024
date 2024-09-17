@@ -1,0 +1,90 @@
+name: Terraform CI
+
+on:
+  workflow_call:
+    secrets:
+      AWS_ACCESS_KEY_ID:
+        description: AWS access key for github actions
+        required: true
+      AWS_SECRET_ACCESS_KEY:
+        description: AWS secret keu for github actions
+        required: true
+    inputs:
+      aws_region:
+        description: AWS default region
+        type: string
+        required: true
+
+jobs:
+  terraform:
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v4
+
+    - name: Set up Terraform
+      uses: hashicorp/setup-terraform@v3
+      with:
+        terraform_version: 1.9.0
+
+    - name: Lint Terraform code
+      uses: terraform-linter/terraform-linter@v0.11.0
+      with:
+        terralint-path: .terraform-linter.hcl
+
+    - name: Set up tflint
+      run: |
+        curl -s https://raw.githubusercontent.com/terraform-linters/tflint/master/install_linux.sh | bash
+
+    - name: Set up tfsec
+      run: |
+        curl -s https://raw.githubusercontent.com/aquasecurity/tfsec/master/scripts/install_linux.sh | bash
+
+    - name: Set up checkov
+      run: pip3 install -U checkov
+
+    - name: Terraform Init
+      run: terraform init
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        TF_ACTION_WORKING_DIR: '.'
+        AWS_ACCESS_KEY_ID:  ${{ secrets.AWS_ACCESS_KEY_ID }}
+        AWS_SECRET_ACCESS_KEY:  ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+
+    - name: Terraform Validate
+      run: terraform validate
+
+    - name: Terraform Lint
+      run: tflint --init && tflint
+
+    - name: Terraform Security Scan
+      run: tfsec .
+
+    - name: Terraform Plan
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        TF_ACTION_WORKING_DIR: '.'
+        AWS_ACCESS_KEY_ID:  ${{ secrets.AWS_ACCESS_KEY_ID }}
+        AWS_SECRET_ACCESS_KEY:  ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+      run: terraform plan -out=tfplan
+
+    - name: Terraform fmt
+      id: fmt
+      run: terraform fmt -check
+      continue-on-error: true
+
+    - name : Checkov Scan
+      run: |
+        terraform show -json tfplan > tf.json
+        checkov -f tf.json
+      continue-on-error: true
+
+    - name: Upload Terraform plan
+      uses: actions/upload-artifact@v4
+      with:
+        name: terraform-plan
+        path: tfplan
+
+    - name: Terraform apply
+      run: terraform apply 

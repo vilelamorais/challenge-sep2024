@@ -1,0 +1,126 @@
+name: Terraform Tests and Scans
+
+on:
+  workflow_call:
+    secrets:
+      AWS_ACCESS_KEY_ID:
+        description: AWS access key for github actions
+        required: true
+      AWS_SECRET_ACCESS_KEY:
+        description: AWS secret keu for github actions
+        required: true
+
+jobs:
+  terraform-unit-tests:
+    name: 'Terraform Unit Tests'
+    if: github.event.pull_request.merged == true && github.event.pull_request.base.ref == 'main'
+    runs-on: ubuntu-latest
+    env:
+      AWS_ACCESS_KEY_ID: ${{ secrets.PIPELINE_EKS_CENTRALIZADO_AWS_ACCESS_KEY_ID }}
+      AWS_SECRET_ACCESS_KEY: ${{ secrets.PIPELINE_EKS_CENTRALIZADO_AWS_SECRET_ACCESS_KEY }}
+      AWS_REGION: ${{ vars.AWS_REGION }}
+      GITHUB_TOKEN: ${{ github.token }}
+    
+    steps:
+    # Checkout the repository to the GitHub Actions runner
+    - name: Github - Checkout repository
+      id:   git-checkout
+      uses: actions/checkout@v4
+
+    # Install the latest version of Terraform CLI and configure the Terraform CLI configuration file with a Terraform Cloud user API token
+    - name: Terraform - Setup Terraform CLI
+      id:   tf-setup
+      uses: hashicorp/setup-terraform@v3
+
+    # Initialize a new or existing Terraform working directory by creating initial files, loading any remote state, downloading modules, etc.
+    - name: Terraform - Init
+      id:   tf-init
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        TF_ACTION_WORKING_DIR: '.'
+        AWS_ACCESS_KEY_ID:  ${{ secrets.AWS_ACCESS_KEY_ID }}
+        AWS_SECRET_ACCESS_KEY:  ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+      run:  terraform init
+
+    # Validate terraform files
+    - name: Terraform - Validate
+      id:   tf-validate
+      run:  terraform validate
+      continue-on-error: true
+
+    # Checks that all Terraform configuration files adhere to a canonical format recursively
+    - name: Terraform Format
+      run: terraform fmt -check -recursive
+      continue-on-error: true
+
+    # Cache pluggable terraform linter for ubuntu-latest
+    - name: TFlint - Cache plugin directory
+      id:   tflint-cache
+      uses: actions/cache@v4
+      with:
+        path: ~/.tflint.d/plugins
+        key: ubuntu-latest-tflint-${{ hashFiles('.tflint.hcl') }}
+
+    # Install and prepara environment for TFlint
+    - name: TFlint - Setup TFLint
+      id:   tflint-setup
+      uses: terraform-linters/setup-tflint@v4
+
+    # Initialize TFlint
+    - name: TFlint - Init
+      id:   tflint-init
+      run:  tflint --init
+
+    # Lint local files
+    - name: TFlint - Lint
+      id:   tflint-lint
+      run:  tflint -f compact
+      continue-on-error: true
+
+    # Perform a security scan of the terraform code using Tenable Scan
+    - name: Tenable Terrascan - Scan
+      id: terrascan-scan
+      uses: tenable/terrascan-action@main
+      with:
+        iac_type: 'terraform'
+        iac_version: 'v14'
+        policy_type: 'aws'
+        verbose: true
+        sarif_upload: false # Only available for Github Enterprise subscription
+        only_warn: true
+      continue-on-error: true
+
+    # # Upload results to GitHub Advanced Security
+    # # Only available for Github Enterprise subscription
+    # - name: Upload SARIF file
+    #   uses: github/codeql-action/upload-sarif@v3
+    #   with:
+    #     sarif_file: terrascan.sarif
+
+    # Perform a security scan of the terraform code using Aqua tfsec
+    - name: Aqua tfsec - Scan
+      id: tfsec-scan
+      uses: aquasecurity/tfsec-action@v1.0.0
+      with:
+        additional_args: --exclude-downloaded-modules
+        soft_fail: true
+
+    # Perform a security scan of the terraform code using checkov
+    - name: Run Checkov action
+      id: ckv-scan
+      uses: bridgecrewio/checkov-action@master
+      with: 
+        framework: terraform
+        # This will add both a CLI output to the console and create a results.sarif file
+        output_format: cli,sarif
+        output_file_path: console,results.sarif
+        soft_fail: true
+
+    # Upload results to GitHub Advanced Security
+    # Only available for Github Enterprise subscription
+    # - name: Upload SARIF file
+    #   if: success() || failure()
+    #   uses: github/codeql-action/upload-sarif@v3
+    #   with:
+    #     sarif_file: results.sarif
+    #     category: checkov
